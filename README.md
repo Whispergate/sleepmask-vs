@@ -141,3 +141,75 @@ ModLoad: 00007ffa`91050000 00007ffa`91058000   C:\Windows\System32\NSI.dll
 DRAUGR: Return value: 0x0000000000CC0008
 SLEEPMASK: Unmasking Section - Address: 0000000000C40000
 ```
+
+---
+
+## Starburst (Mythic) Compatibility
+
+Sleepmask-VS is fully compatible with the **Starburst** Mythic C2 agent. Starburst includes a built-in COFF loader that loads the compiled sleepmask object file at agent initialization and invokes it during every sleep cycle and BeaconGate-proxied WinAPI call.
+
+### How to use with Starburst
+
+1. Develop your sleepmask using the Visual Studio Debug target as usual (see above)
+2. ZIP this entire repository folder (including the `bof-vs/` submodule)
+3. In the Mythic payload builder, set **Sleep Mask** to `sleepmask_vs`
+4. Upload the ZIP in the **Sleepmask-VS ZIP** file field that appears
+5. Build the payload
+
+The builder automatically cross-compiles the sleepmask source on Linux using Clang, embeds the resulting COFF object into the agent binary, and loads it at runtime. No manual compilation or `.cna` scripts are required.
+
+**Note:** When `sleepmask_vs` is selected, Starburst's call stack spoofing (`spoof_profile`) is automatically disabled since the sleepmask manages its own call stack via BeaconGate.
+
+### ZIP structure
+
+The uploaded ZIP must contain both the sleepmask source and the BOF-VS headers. The builder searches for them automatically, so any of these layouts work:
+
+```
+# Zipped as the repo root
+sleepmask-vs/
+├── sleepmask-vs/
+│   ├── your-sleepmask.cpp    <-- must define sleep_mask()
+│   ├── sleepmask-vs.h
+│   ├── library/
+│   └── ...
+└── bof-vs/
+    └── BOF-Template/
+        ├── beacon.h
+        ├── beacon_gate.h
+        ├── sleepmask.h
+        └── base/
+            └── helpers.h
+
+# Or zipped as the contents directly
+your-sleepmask.cpp
+sleepmask-vs.h
+library/
+bof-vs/
+└── BOF-Template/
+    └── ...
+```
+
+### Entry point contract
+
+The builder scans all `.cpp` files in the sleepmask-vs source directory for the `sleep_mask` function signature:
+
+```cpp
+void sleep_mask(PBEACON_INFO info, PFUNCTION_CALL functionCall);
+```
+
+The file name does not matter. Only one `.cpp` in the root of the source directory should define this function. The builder will find it and compile it as the entry point.
+
+### How it works at runtime
+
+1. **Agent init**: Starburst's COFF loader parses the embedded sleepmask object, allocates executable memory, resolves symbols (DFR_LOCAL imports via LoadLibrary/GetProcAddress), and processes relocations.
+
+2. **Sleep cycle**: Before sleeping, Starburst builds a `BEACON_INFO` struct containing the agent's memory layout, heap records, XOR mask key, and `ALLOCATED_MEMORY` regions. It then calls `sleep_mask(info, functionCall)` with `bMask = TRUE` and a `WaitForSingleObject` call, which triggers the mask-sleep-unmask cycle.
+
+3. **BeaconGate**: When enabled, WinAPI calls made by BOFs (e.g. `BeaconVirtualAlloc`, `BeaconVirtualProtect`) are routed through `sleep_mask(info, functionCall)` with `bMask = FALSE`, allowing the sleepmask to proxy them through indirect syscalls, return address spoofing, or any custom gate implementation.
+
+### Development notes
+
+- **DFR_LOCAL**: Use `DFR_LOCAL(MODULE, Function)` for any WinAPI calls within the sleepmask. These are resolved at load time by the COFF loader via `LoadLibrary`/`GetProcAddress`.
+- **Unity build**: The entry point `.cpp` should include all library files inline (the default pattern via `#include "library/..."` directives). The builder compiles only the single entry point file.
+- **Backslash paths**: Windows-style backslash include paths (`#include "library\gate.cpp"`) are automatically converted to forward slashes during cross-compilation. You do not need to modify your source.
+- **Pre-compiled fallback**: If no ZIP is uploaded, the builder searches for a pre-compiled `.o` file in the `sleepmask-vs/` directory adjacent to the Starburst agent on disk.
