@@ -1,0 +1,3 @@
+[submodule "bof-vs"]
+	path = bof-vs
+	url = https://github.com/Whispergate/bof-vs
